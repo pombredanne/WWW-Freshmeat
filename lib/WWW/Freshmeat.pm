@@ -6,191 +6,55 @@ use warnings;
 
 =head1 NAME
 
-WWW::Freshmeat - automates searches on Freshmeat.net
+WWW::Freshmeat - automates usage of Freshmeat.net
 
 =head1 VERSION
 
-Version 0.12
+Version 0.20
 
 =cut
 
-our $VERSION = '0.12';
+our $VERSION = '0.20';
 
 use XML::Simple qw();
+use WWW::Freshmeat::Project;
+use Carp;
+
 
 =head1 SYNOPSIS
 
     use WWW::Freshmeat;
 
-    my $fm = WWW::Freshmeat->new;
+    my $fm = WWW::Freshmeat->new(token=>'freshmeat_token');
 
     my $project = $fm->retrieve_project('project_id');
 
     foreach my $p ( @projects, $project ) {
         print $p->name(), "\n";
-        print $p->url(), "\n";
         print $p->version(), "\n";
         print $p->description(), "\n";
     }
 
 =cut
 
-package WWW::Freshmeat::Project;
-
-sub new {
-
-    my $proto = shift;
-    my $class = ref($proto) || $proto;
-
-    my $self = bless shift, $class;
-    $self->{www_freshmeat} = shift;
-    return $self;
-}
-
-foreach my $field ( qw( url_project_page url_homepage projectname_full desc_short desc_full license www_freshmeat projectname_short) ) {
-    no strict 'refs';
-    *$field = sub {
-        my $self = shift;
-        my $value = $self->{$field};
-        if ( ref($value) && ref($value) eq 'HASH' && !(keys %$value) ) {
-            return undef;
-        }
-        else {
-            return $value;
-        }
-    }
-}
-
-sub name        { $_[0]->projectname_full(@_) || $_[0]->projectname_short(@_) } 
-sub description { $_[0]->desc_full(@_) || $_[0]->desc_short(@_) } 
-sub version     { $_[0]{latest_release}{latest_release_version} }
-sub trove_id    { $_[0]{descriminators}{trove_id} }
-
-sub url {
-    my $self = shift;
-    return $self->{url} if $self->{url};
-    my $freshmeat_url = $self->{url_project_page};
-
-    my $url = $self->url_homepage() or return;
-
-    $self->{url} = $self->www_freshmeat()->redir_url($url);
-    return $self->{url};
-}
-
-sub init_html {
-    my $self = shift;
-    my $html = shift;
-    require HTML::TreeBuilder::XPath;
-    $self->{_html}=HTML::TreeBuilder::XPath->new_from_content($html);
-}
-
-sub _html_tree {
-    my $self = shift;
-    if (!$self->{_html}) {
-      my $id=$self->projectname_short();
-      my $url = "http://freshmeat.net/projects/$id/";
-      $self->www_freshmeat()->agent('User-Agent: Mozilla/5.0 (Windows; U; Windows NT 5.1; ru; rv:1.8.1.19) Gecko/20081201 Firefox/2.0.0.19');
-      my $response = $self->www_freshmeat()->get($url);
-      my $html = $response->content();
-      if ($response->is_success) {
-        $self->init_html($html);
-      } else {
-        die "Could not GET $url (".$response->status_line.", $html)";
-      }
-    }
-    return $self->{_html};
-}
-
-sub branches {
-    my $self = shift;
-    my $tree=$self->_html_tree();
-    my $nodes=$tree->findnodes(q{//table/tr/th/b[text()='Branch']/../../following-sibling::tr/td[1]/a});
-    my %list;
-    while (my $node=$nodes->shift) {
-      if ($node->attr('href') =~m#/branches/(\d+)/#) {
-        $list{$1}=$node->as_text();
-      } else {
-        die;
-      }
-    }
-    return %list;
-}
-
-our $project_re=qr/[a-z0-9_\-\.]+/;
-sub url_list {
-    my $self = shift;
-    my $real=(@_>0?1:0);
-    my $tree=$self->_html_tree();
-    my $nodes=$tree->findnodes(q{/html/body/div/table/tr/td/table/tr/td/p/a[@href=~/\/redir/]}); #/
-    my %list;
-    while (my $node=$nodes->shift) {
-      if ($node->attr('href') =~m#/redir/$project_re/\d+/(url_\w+)/#) {
-        my $type=$1;
-        my $text=$node->as_text();
-        if ($text=~/\Q[..]\E/) {
-          if ($real) {
-            $list{$type}=$self->www_freshmeat()->redir_url('http://freshmeat.net'.$node->attr('href'));
-          } else {
-            $list{$type}=$node->attr('href');
-          }
-        } else {
-          $list{$type}=$text;
-        }
-      } else {
-        die "bad link:".$node->attr('href');
-      }
-    }
-    return %list;
-}
-
-my %popularity_conv=('Record hits'=>'record_hits','URL hits'=>'url_hits','Subscribers'=>'subscribers');
-sub popularity {
-    my $self = shift;
-    my $tree=$self->_html_tree();
-    my $nodes=$tree->findnodes(q{/html/body/div[1]/table/tr/td[2]/table/tr[3]/td[3]/table[2]/tr/td/small});
-    my %list;
-    if (my $node=$nodes->shift) {
-      my $text=$node->as_text();
-      $text=~s/ / /g;
-      my @list=grep {$_} split /<br(?: \/)?>|\s{4}/,$text;
-      foreach my $s (@list) {
-        $s=~s/^(?:^&nbsp;|\s)+//s;
-        $s=~s/\s+$//s;
-        #print "F:$s\n";
-        if ($s=~/(\w[\w\s]+\w):\s+([\d,]+)/ and exists $popularity_conv{$1}) {
-          my $type=$popularity_conv{$1};
-          my $num=$2;
-          $num=~s/,//g;
-          $list{$type}=$num;
-        } else {
-          die "Cannot find popularity record: '$s'";
-        }
-        
-      }
-    } else {
-      die "Cannot find popularity data";
-    }
-    return %list;
-}
-
-sub real_author {
-    my $self = shift;
-    my $tree=$self->_html_tree();
-    my $nodes=$tree->findnodes(q{/html/body/div[1]/table/tr/td[2]/table/tr[3]/td[1]/p[2]/b/..});
-    my %list;
-    if (my $node=$nodes->shift) {
-      my $text=$node->as_text;
-      $text=~s/^Author:\s+//s;
-      $text=~s/\s+\Q[contact developer]\E\s*$//s;
-      $text=~s/\s+<[^<>]+>\s*$//s;
-      return $text;
-    }
-}
-
-
 package WWW::Freshmeat;
 
 use base qw( LWP::UserAgent );
+
+sub new {
+  my $class=shift;
+  my $self=LWP::UserAgent->new();
+  bless $self,$class;
+  my %data=@_;
+  $self->{fm_token}=$data{token};
+  return $self;
+}
+
+sub _token {
+  my $self = shift;
+  croak "No token" unless $self->{fm_token};
+  return $self->{fm_token};
+}
 
 =head1 DESCRIPTION
 
@@ -210,17 +74,21 @@ undef if the project entry cannot be found.
 =cut
 
 sub retrieve_project {
-
     my $self = shift;
     my $id   = shift;
 
-    my $url = "http://freshmeat.net/projects-xml/$id/$id.xml";
+    my $url = "http://freshmeat.net/projects/$id.xml?auth_code=".$self->_token;
+
     my $response = $self->get($url);
     if ($response->is_success) {
       my $xml = $response->content();
       return $self->project_from_xml($xml);
     } else {
-      die "Could not GET $url";
+      if ($response->code eq '404') {
+        return undef;
+      } else {
+        die "Could not GET freshmeat project (".$response->status_line.")";
+      }
     }
 }
 
@@ -238,12 +106,22 @@ sub project_from_xml {
     if ($xml eq 'Error: project not found.') {
       return undef;
     }
+    die "XML is empty" unless $xml;
 
-    my $data = XML::Simple::XMLin($xml);
+    my $data = XML::Simple::XMLin($xml,ForceArray => ['approved-url','recent-release']);
+    #die unless exists $data->{'project'};
+    die unless $data->{'name'};
 
-    return WWW::Freshmeat::Project->new($data->{'project'}, $self);
+    return WWW::Freshmeat::Project->new($data, $self); #->{'project'}
 }
 
+sub retrieve_user {
+    croak "'User' is temporarily removed";
+    my $self = shift;
+    my $id   = shift;
+    require WWW::Freshmeat::User;
+    return WWW::Freshmeat::User->new($self,$id);
+}
 
 =item B<redir_url> I<STRING>
 
@@ -275,88 +153,15 @@ sub redir_url {
 
 =back
 
-=head2 WWW::Freshmeat::Project methods
-
-The C<WWW::Freshmeat::Project> object provides some of the fields from the
-freshmeat.net entry through the following methods
-
-=over 4
-
-=item B<url_project_page>
-
-=item B<url_homepage>
-
-=item B<projectname_full>
-
-=item B<desc_short>
-
-=item B<desc_full>
-
-=item B<license>
-
-=item B<trove_id>
-
-=item B<projectname_short>
-
-=item B<www_freshmeat>
-
-=back
-
-Additionally, it provides the following "higher-level" methods:
-
-=over 4
-
-=item B<name>
-
-=item B<description>
-
-Return either C<projectname_full> (respectively C<desc_full>) or
-C<projectname_short> (respectively C<desc_short>) if the former is empty.
-
-=item B<version>
-
-Returns the version of the latest release.
-
-=item B<url>
-
-C<url_homepage> returns a freshmeat.net URL that redirects to the actual
-project's home page. This url() method tries to follow the redirection and
-returns the actual homepage URL if it can be found, or the URL to the
-freshmeat.net entry for the project.
-
-=item B<branches>
-
-List of branches for project. Returns hash in form of (branch id => branch name).
-
-=item B<popularity>
-
-Freshmeat popularity data for project. Returns hash with keys
-record_hits, url_hits, subscribers
-
-=item B<url_list>
-
-Returns list of URLs for project. You may need to use redir_url to get real link
-or just pass 1 as argument.
-
-=item B<real_author>
-
-Returns name of author (not maintainer).
-
-=back
-
-
-
 =head1 SEE ALSO
 
 L<LWP::UserAgent>.
 
 =head1 AUTHOR
 
-Cedric Bouvier, C<< <cbouvi at cpan.org> >>
+Cedric Bouvier, C<< <cbouvi at cpan.org> >>. Alexandr Ciornii.
 
 =head1 BUGS
-
-This is very alpha code. It does not even support searching!
 
 Please report any bugs or feature requests to
 C<bug-www-freshmeat at rt.cpan.org>, or through the web interface at
@@ -396,7 +201,7 @@ L<http://search.cpan.org/dist/WWW-Freshmeat>
 
 =head1 COPYRIGHT & LICENSE
 
-Copyright 2006 Cedric Bouvier.
+Copyright 2006 Cedric Bouvier (version 0.01).
 Copyright 2009 Alexandr Ciornii.
 
 This program is free software; you can redistribute it and/or modify it
